@@ -6,6 +6,20 @@ Litestream
 ![test](https://github.com/benbjohnson/litestream/workflows/test/badge.svg)
 ==========
 
+> **Note: This is a fork of the original [Litestream](https://github.com/benbjohnson/litestream) project, as the project does not accept outside features.**
+> 
+> This fork was created to support massive multitenant applications where each tenant gets their own SQLite database file. 
+>
+> It adds **multi-database support** that handles 100,000+ databases efficiently through:
+> - **Hot/cold tier management** - Only actively-used databases consume resources
+> - **96.6% memory reduction** - From 1.2GB to 41MB for 100K databases (assuming 1000 "hot" dbs per second)
+> - **Connection pooling** - Dynamic connections with configurable limits
+> - **Aggregated metrics** - Avoid Prometheus cardinality explosion
+> 
+> All multi-database features are in the `litestreampp/` package. See [litestreampp/README.md](litestreampp/README.md) for details.
+
+---
+
 Litestream is a standalone disaster recovery tool for SQLite. It runs as a
 background process and safely replicates changes incrementally to another file
 or S3. Litestream only communicates with SQLite through the SQLite API so it
