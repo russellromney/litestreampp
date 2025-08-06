@@ -1,0 +1,61 @@
+# Litestream configuration with multi-database support
+
+# Standard single-database configuration (still works)
+# dbs:
+#   - path: /var/lib/myapp/db.sqlite
+#     replicas:
+#       - type: s3
+#         bucket: my-bucket
+#         path: myapp
+
+# Multi-database configuration
+multi-db:
+  # Enable multi-database mode
+  enabled: true
+  
+  # Glob patterns to discover databases
+  patterns:
+    - "/data/*/databases/*/branches/*/tenants/*.db"
+    - "/var/lib/projects/*/data/*.db"
+  
+  # Resource limits
+  max-hot-databases: 1000      # Maximum databases with full Litestream features
+  scan-interval: 30s           # How often to scan for new/changed databases
+  
+  # Replica template - used for all discovered databases
+  replica-template:
+    type: s3
+    bucket: my-litestream-backups
+    region: us-east-1
+    
+    # Path template with variable substitution
+    # Available variables: {{project}}, {{database}}, {{branch}}, {{tenant}}
+    path: "{{project}}/{{database}}/{{branch}}/{{tenant}}"
+    
+    # Hot database sync interval
+    sync-interval: 1s
+    
+    # S3 credentials (or use IAM role)
+    # access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+    # secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+  
+  # Cold database handling
+  cold-sync-interval: 30s      # How often to snapshot cold databases
+  cold-sync-mode: snapshot     # "snapshot" or "none"
+  
+  # Criteria for promoting to hot tier
+  hot-promotion:
+    recent-modify-threshold: 5m   # Databases modified within 5 minutes
+    access-count-threshold: 10    # Databases accessed 10+ times
+
+# Monitoring
+addr: ":9090"
+
+# Logging
+logging:
+  level: info
+  
+# Snapshot settings (applies to hot databases)
+snapshot:
+  interval: 1h
+  retention: 24h

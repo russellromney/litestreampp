@@ -8,3 +8,8 @@ CLAUDE.md
 
 # Binary
 bin/
+
+.test-data/
+.demo-data/
+.litestream-demos
+.env

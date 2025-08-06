@@ -258,8 +258,19 @@ func (db *DB) PageSize() int {
 	return db.pageSize
 }
 
+// InitContext initializes the context and cancel function if not already set.
+// This is needed for dynamically created DBs that don't go through NewDBFromConfig.
+func (db *DB) InitContext() {
+	if db.ctx == nil {
+		db.ctx, db.cancel = context.WithCancel(context.Background())
+	}
+}
+
 // Open initializes the background monitoring goroutine.
 func (db *DB) Open() (err error) {
+	// Ensure context is initialized
+	db.InitContext()
+	
 	// Validate fields on database.
 	if db.MinCheckpointPageN <= 0 {
 		return fmt.Errorf("minimum checkpoint page count required")
@@ -282,7 +293,9 @@ func (db *DB) Open() (err error) {
 // Close flushes outstanding WAL writes to replicas, releases the read lock,
 // and closes the database. Takes a context for final sync.
 func (db *DB) Close(ctx context.Context) (err error) {
-	db.cancel()
+	if db.cancel != nil {
+		db.cancel()
+	}
 	db.wg.Wait()
 
 	// Perform a final db sync, if initialized.
