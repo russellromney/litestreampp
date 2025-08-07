@@ -118,6 +118,8 @@ func (m *Main) Run(ctx context.Context, args []string) (err error) {
 
 	case "restore":
 		return (&RestoreCommand{}).Run(ctx, args)
+	case "restore-pattern":
+		return (&RestorePatternCommand{}).Run(ctx, args)
 	case "version":
 		return (&VersionCommand{}).Run(ctx, args)
 	case "ltx":
@@ -146,11 +148,12 @@ Usage:
 
 The commands are:
 
-	databases    list databases specified in config file
-	ltx          list available LTX files for a database
-	replicate    runs a server to replicate databases
-	restore      recovers database backup from a replica
-	version      prints the binary version
+	databases        list databases specified in config file
+	ltx              list available LTX files for a database
+	replicate        runs a server to replicate databases
+	restore          recovers database backup from a replica
+	restore-pattern  recovers multiple database backups matching a pattern
+	version          prints the binary version
 `[1:])
 }
 

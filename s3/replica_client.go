@@ -148,6 +148,32 @@ func (c *ReplicaClient) findBucketRegion(ctx context.Context, bucket string) (st
 	return DefaultRegion, nil
 }
 
+// ListObjectsWithPrefix lists all objects in the bucket with the given prefix.
+// This is a public method to support pattern-based discovery for restore operations.
+func (c *ReplicaClient) ListObjectsWithPrefix(ctx context.Context, bucket, prefix string, callback func(key string) error) error {
+	c.mu.Lock()
+	s3Client := c.s3
+	c.mu.Unlock()
+	
+	if s3Client == nil {
+		return fmt.Errorf("s3 client not initialized")
+	}
+	
+	input := &s3.ListObjectsV2Input{
+		Bucket: aws.String(bucket),
+		Prefix: aws.String(prefix),
+	}
+	
+	return s3Client.ListObjectsV2PagesWithContext(ctx, input, func(page *s3.ListObjectsV2Output, lastPage bool) bool {
+		for _, obj := range page.Contents {
+			if err := callback(aws.StringValue(obj.Key)); err != nil {
+				return false // Stop pagination on error
+			}
+		}
+		return true // Continue to next page
+	})
+}
+
 // DeleteAll deletes all LTX files.
 func (c *ReplicaClient) DeleteAll(ctx context.Context) error {
 	if err := c.Init(ctx); err != nil {

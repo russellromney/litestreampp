@@ -1,149 +1,220 @@
-# Litestream Memory Optimization Implementation Spec
+# Proposal: Simple Pattern-Based Recovery for Litestream Multi-Database Support
 
 ## Executive Summary
 
-This spec details the implementation of memory optimizations for Litestream to support 100K+ databases efficiently. The changes focus on reducing per-database memory overhead through shared resources, hierarchical metrics, and dynamic connection management while maintaining backward compatibility.
+This proposal outlines a straightforward bulk recovery system for Litestream that can efficiently restore thousands of databases using glob patterns. The system provides parallel restoration without complexity, making it easy to recover all databases under a given path with a single command.
 
-## Core Changes Overview
+## Problem Statement
 
-### 1. Metrics System Overhaul
-Replace per-database Prometheus metrics with hierarchical aggregation to reduce memory from 500MB to 3MB for 100K databases.
+Current Litestream recovery limitations:
+- Can only restore one database at a time
+- No support for bulk recovery operations
+- Sequential recovery of many databases is time-consuming
+- Must run individual restore commands for each database
 
-### 2. Worker Pool Architecture  
-Replace per-database goroutines (3-5 per DB) with shared worker pools, reducing goroutine count from 300K+ to ~350 total.
+## Proposed Solution
 
-### 3. Connection Pool Management
-Implement dynamic connection pooling with 5-second idle timeout, keeping connections only for actively syncing databases.
+### 1. New `restore-pattern` Command
 
-### 4. Shared S3 Client Pool
-Replace per-replica S3 clients with a shared pool of 200 clients, reducing memory from 100MB to 20MB.
+Add a new command that restores databases matching a pattern. Works in two modes:
 
-### 5. Hot/Cold Tier System
-Implement write-based hot/cold detection with 15-second scanning intervals, promoting only modified databases to hot tier.
+#### Mode A: From Configuration (databases that exist in config)
+```bash
+# Restore all configured databases matching pattern
+litestream restore-pattern "/data/**/*.db" -config litestream.yml
+
+# Restore with custom parallelism  
+litestream restore-pattern "/data/**/*.db" --parallel 20
+
+# Restore to different base directory
+litestream restore-pattern "/data/**/*.db" --output-dir "/restored"
+```
+
+#### Mode B: From S3 URL Pattern (discover from S3)
+```bash
+# Discover and restore all databases under S3 prefix
+litestream restore-pattern "s3://mybucket/backups/project1/**/*.db"
+
+# Restore specific project that doesn't exist locally
+litestream restore-pattern "s3://mybucket/backups/myproject/" --output-dir "/data"
+
+# With progress tracking
+litestream restore-pattern "s3://mybucket/backups/**/*.db" --progress
+```
+
+### 2. Discovery Mechanism
+
+#### For Configuration Mode:
+- Read litestream.yml and find all configured databases
+- Filter by glob pattern against database paths
+- Use existing replica configuration for each database
+
+#### For S3 URL Mode:
+- List objects in S3 bucket with given prefix
+- Identify database backups by LTX file structure
+- Infer database paths from S3 object keys
+- Create temporary replica clients for restoration
+
+### 3. Simple Output Options
+
+- **Default**: Restore to original locations (config mode) or inferred paths (S3 mode)
+- **`--output-dir`**: Restore to different base directory, preserving relative structure
+- **`--if-db-not-exists`**: Skip databases that already exist at destination
+
+### 4. Parallel Execution
+
+- Configurable worker pool (default: 10 parallel restores)
+- Each database restored independently  
+- No blocking between databases
+- Automatic retry on transient failures (S3 rate limits, network issues)
+
+### 5. Progress Tracking
+
+```bash
+$ litestream restore-pattern "/data/**/*.db" --progress
+
+Discovering databases... found 1,543
+Checking S3 availability... 1,541 available
+
+Restoring databases:
+[████████████████████████░░░░░░] 82% (1,264/1,541)
+Speed: 127 MB/s | ETA: 4m | Errors: 2
+```
+
+### 6. Implementation Architecture
+
+```go
+// Simple recovery manager
+type PatternRestoreCommand struct {
+    Pattern      string
+    OutputDir    string  
+    Parallelism  int
+    ShowProgress bool
+    ConfigPath   string // optional, for config mode
+}
+
+// Workflow
+func (c *PatternRestoreCommand) Run(ctx context.Context) error {
+    var databases []DatabaseInfo
+    
+    // 1. Discover databases based on pattern type
+    if isS3URL(c.Pattern) {
+        // List S3 objects and identify database backups
+        databases = discoverFromS3(ctx, c.Pattern)
+    } else {
+        // Read config and filter by pattern
+        databases = discoverFromConfig(c.ConfigPath, c.Pattern)
+    }
+    
+    // 2. Create worker pool
+    pool := NewWorkerPool(c.Parallelism)
+    
+    // 3. Submit restore jobs
+    for _, db := range databases {
+        pool.Submit(func() {
+            restoreDatabase(ctx, db, c.OutputDir)
+        })
+    }
+    
+    // 4. Wait for completion with progress
+    pool.WaitWithProgress(c.ShowProgress)
+}
+```
+
+### 7. Error Handling
+
+- Continue on individual database failures (don't stop entire recovery)
+- Log failed databases to a file for manual retry
+- Summary report at the end showing success/failure counts
+- Automatic retry with exponential backoff for transient errors
+
+### 8. Configuration Integration
+
+```yaml
+# litestream.yml
+restore-pattern:
+  # Default parallelism for pattern restores
+  parallel-workers: 10
+  
+  # Retry configuration
+  max-retries: 3
+  retry-delay: 5s
+```
+
+## Benefits
+
+1. **Simple to Use** - One command to restore all databases
+2. **Fast** - Parallel processing significantly reduces recovery time
+3. **Reliable** - Automatic retries and error reporting
+4. **Flexible** - Works with any directory structure via glob patterns
+5. **No Assumptions** - Doesn't require specific naming conventions
 
 ## Implementation Plan
 
-### Phase 1: Core Infrastructure (Week 1)
+### Phase 1: Core Implementation (Week 1)
+- Pattern discovery using existing glob support
+- Basic parallel restoration using worker pool
+- Integration with existing restore logic
 
-#### 1.1 Shared Resource Manager
-- Create `shared_resources.go` with pools for workers, S3 clients, and buffers
-- Implement worker pools for monitor (100), snapshot (50), and replica (200) tasks
-- Add buffer pool using sync.Pool for temporary allocations
+### Phase 2: Progress & Error Handling (Week 2)
+- Progress tracking and ETA calculation
+- Error collection and reporting
+- Retry logic for transient failures
 
-#### 1.2 Hierarchical Metrics
-- Modify existing metrics in `db.go` to remove per-database labels
-- Create new aggregated metrics structure tracking project/database levels only
-- Update metric recording to aggregate at collection time
+### Phase 3: Testing & Documentation (Week 3)
+- Testing with various database counts (10, 100, 1000+)
+- CLI documentation
+- Example usage patterns
 
-### Phase 2: Connection and Client Management (Week 2)
+## Resource Requirements
 
-#### 2.1 Connection Pool
-- Implement connection pool in existing code (not new file)
-- Add 5-second idle timeout with background cleanup goroutine
-- Use read-only connections for hot databases
-- Track connection usage statistics
+- **Memory**: ~1MB per 1000 databases for tracking
+- **CPU**: Minimal (mostly I/O bound)
+- **Network**: Configurable parallel S3 connections (default: 10)
 
-#### 2.2 S3 Client Pool  
-- Modify replica code to use shared S3 clients
-- Implement pool with 200 clients maximum
-- Add client checkout/return mechanism
-- Handle regional client requirements
+## Success Metrics
 
-### Phase 3: Hot/Cold Tier Logic (Week 3)
+1. **Recovery Time**: 10-100x faster than sequential restoration
+2. **Reliability**: > 99% successful recovery rate with retries
+3. **Simplicity**: Single command for bulk recovery
 
-#### 3.1 Write Detection System
-- Add 15-second scan loop to check mtime/size changes
-- Implement hot promotion for modified databases
-- Add automatic demotion after 15 seconds of inactivity
-- Persist hot database list to S3 for failover
+## Example Usage
 
-#### 3.2 Dynamic Database Lifecycle
-- Modify DB struct to support lazy initialization
-- Add connection open/close based on hot/cold state
-- Implement state transitions without data loss
+### Restoring a Single Project from S3
 
-### Phase 4: Integration and Testing (Week 4)
+```bash
+# Project doesn't exist locally - discover and restore from S3
+$ litestream restore-pattern "s3://mybucket/backups/myproject/" --output-dir "/data/myproject"
+Discovering databases in S3... found 42
+Restoring 42 databases to /data/myproject/
+Completed in 2m 15s
+```
 
-#### 4.1 Backward Compatibility
-- Ensure existing single-database configs work unchanged
-- Add multi-db detection in replicate command
-- Test migration from standard to multi-db mode
+### Restoring Multiple Projects
 
-#### 4.2 Performance Testing
-- Create test harness for 10K+ databases
-- Measure memory usage vs baseline
-- Verify 1-second sync intervals maintained
-- Test failover/recovery scenarios
+```bash
+# Restore all databases under /data from config
+$ litestream restore-pattern "/data/**/*.db" -config litestream.yml
+Restored 1,543 databases in 12m 34s
 
-## Technical Details
+# Restore all projects from S3 bucket
+$ litestream restore-pattern "s3://mybucket/backups/**/*.db" --output-dir "/recovered"
+Discovered 5,234 databases across 127 projects
+Restoring with 10 parallel workers...
+Completed in 48m 12s
 
-### Memory Targets
-- Cold database: 240 bytes (just tracking info)
-- Hot database: ~50KB (down from 500KB)
-- 100K total with 1K hot: 123MB total
+# Restore with custom settings
+$ litestream restore-pattern "/apps/*/tenant-*.db" \
+  --parallel 20 \
+  --output-dir "/recovery" \
+  --progress
 
-### Resource Limits
-- Max connections: 1000 (configurable)
-- Worker goroutines: ~350 total
-- S3 clients: 200 shared
-- File descriptors: 2 × hot databases
+# Check for errors
+$ cat litestream-restore-errors.log
+Failed to restore: /apps/broken/tenant-123.db - backup not found
+Failed to restore: /apps/test/tenant-999.db - checksum mismatch
+```
 
-### Configuration Changes
-Add new `multi-db` section to config while maintaining backward compatibility:
-- Pattern-based database discovery
-- Configurable scan intervals (default 15s)
-- Resource limits (max hot databases)
-- Write detection parameters
+## Conclusion
 
-## Testing Strategy
-
-### Unit Tests
-- Test each pool implementation (connection, S3, worker)
-- Verify metric aggregation logic
-- Test hot/cold state transitions
-
-### Integration Tests  
-- Multi-database discovery
-- Connection lifecycle management
-- Failover with hot list recovery
-- Memory usage validation
-
-### Load Tests
-- 10K databases with varying write patterns
-- Measure CPU usage of scanning
-- Verify connection pool efficiency
-- Test S3 throughput limits
-
-## Risk Mitigation
-
-### Data Loss Prevention
-- Never close connections during active transactions
-- Buffer writes during recovery
-- Maintain WAL position tracking
-
-### Performance Degradation
-- Monitor scan loop CPU usage
-- Implement parallel scanning if needed
-- Add circuit breakers for overload
-
-### Backward Compatibility
-- Detect single vs multi-db mode automatically
-- Preserve all existing functionality
-- No changes to existing APIs
-
-## Success Criteria
-
-1. Support 100K+ databases on single instance
-2. Memory usage < 200MB for 100K databases with 1K hot
-3. Maintain 1-second sync intervals for hot databases
-4. No regression in single-database performance
-5. Complete backward compatibility
-
-## Non-Goals
-
-- Batch operations (keeping operations independent)
-- Distributed coordination between instances
-- Changes to SQLite interaction patterns
-- Major API or configuration changes
-
-This implementation focuses on practical optimizations that provide immediate benefit without adding unnecessary complexity.
+This simplified pattern-based recovery system provides an efficient, easy-to-use solution for restoring multiple databases without unnecessary complexity. It leverages Litestream's existing restore capabilities while adding parallel execution and progress tracking for bulk operations.
